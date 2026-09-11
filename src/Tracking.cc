@@ -1804,8 +1804,21 @@ void Tracking::Track()
 
     if(mpLocalMapper->mbBadImu)
     {
-        cout << "TRACK: Reset map because local mapper set the bad imu flag " << endl;
-        mpSystem->ResetActiveMap();
+        cout
+            << "TRACK: IMU failure detected. "
+            "Preserving map and entering visual relocalization."
+            << endl;
+
+        mpLocalMapper->mbBadImu = false;
+
+        mState = LOST;
+        mTimeStampLost = mCurrentFrame.mTimeStamp;
+
+        mbVelocity = false;
+
+        // We are recovering visually from an IMU failure.
+        mbVisualRecovery = true;
+
         return;
     }
 
@@ -1980,55 +1993,104 @@ void Tracking::Track()
 
                 if (mState == RECENTLY_LOST)
                 {
-                    Verbose::PrintMess("Lost for a short time", Verbose::VERBOSITY_NORMAL);
+                    Verbose::PrintMess(
+                        "TRACK: Recently lost - attempting visual recovery.",
+                        Verbose::VERBOSITY_NORMAL);
 
-                    bOK = true;
-                    if((mSensor == System::IMU_MONOCULAR || mSensor == System::IMU_STEREO || mSensor == System::IMU_RGBD))
+                    /*
+                    * We deliberately avoid IMU prediction here because the
+                    * reason for entering recovery was an inertial failure.
+                    *
+                    * Try to recover directly against the preserved visual map.
+                    */
+                    bOK = Relocalization();
+
+                    if (bOK)
                     {
-                        if(pCurrentMap->isImuInitialized())
-                            PredictStateIMU();
-                        else
-                            bOK = false;
+                        cout
+                            << "TRACK: Visual relocalization recovered "
+                            "the existing map."
+                            << endl;
 
-                        if (mCurrentFrame.mTimeStamp-mTimeStampLost>time_recently_lost)
-                        {
-                            mState = LOST;
-                            Verbose::PrintMess("Track Lost...", Verbose::VERBOSITY_NORMAL);
-                            bOK=false;
-                        }
+                        mState = OK;
+                        mbVelocity = false;
+
+                        /*
+                        * Do not return. Continue through the common
+                        * TrackLocalMap / map-viewer bookkeeping below.
+                        */
+                       // Keep the tracker in visual-recovery mode.
+                        mbVisualRecovery = true;
+                    }
+                    else if (
+                        mCurrentFrame.mTimeStamp -
+                        mTimeStampLost >
+                        time_recently_lost)
+                    {
+                        mState = LOST;
+
+                        Verbose::PrintMess(
+                            "TRACK: Recently-lost timeout.",
+                            Verbose::VERBOSITY_NORMAL);
+
+                        bOK = false;
+                    }
+                }
+               else if (mState == LOST)
+                {
+                    Verbose::PrintMess(
+                        "TRACK: LOST - attempting visual relocalization "
+                        "against preserved map...",
+                        Verbose::VERBOSITY_NORMAL);
+
+                    /*
+                    * Do NOT create a new map here.
+                    *
+                    * Relocalization() searches the current map's
+                    * KeyFrame database and attempts to recover the
+                    * camera pose from the preserved MapPoints.
+                    */
+                    bOK = Relocalization();
+
+                    if (bOK)
+                    {
+                        cout
+                            << "TRACK: Visual relocalization SUCCESS. "
+                            "Resuming existing map."
+                            << endl;
+
+                        /*
+                        * IMPORTANT:
+                        * Do not return here.
+                        *
+                        * We must continue through the normal Tracking()
+                        * bookkeeping below so that:
+                        *
+                        *   - TrackLocalMap()
+                        *   - FrameDrawer
+                        *   - MapDrawer
+                        *   - motion state
+                        *   - frame history
+                        *
+                        * are all updated consistently.
+                        */
+
+                        mState = OK;
+                        mbVelocity = false;
                     }
                     else
                     {
-                        // Relocalization
-                        bOK = Relocalization();
-                        //std::cout << "mCurrentFrame.mTimeStamp:" << to_string(mCurrentFrame.mTimeStamp) << std::endl;
-                        //std::cout << "mTimeStampLost:" << to_string(mTimeStampLost) << std::endl;
-                        if(mCurrentFrame.mTimeStamp-mTimeStampLost>3.0f && !bOK)
-                        {
-                            mState = LOST;
-                            Verbose::PrintMess("Track Lost...", Verbose::VERBOSITY_NORMAL);
-                            bOK=false;
-                        }
+                        cout
+                            << "TRACK: Relocalization failed. "
+                            "Preserving map and waiting for another frame."
+                            << endl;
+
+                        /*
+                        * We must return here because there is no valid camera
+                        * pose for this frame.
+                        */
+                        return;
                     }
-                }
-                else if (mState == LOST)
-                {
-
-                    Verbose::PrintMess("A new map is started...", Verbose::VERBOSITY_NORMAL);
-
-                    if (pCurrentMap->KeyFramesInMap()<10)
-                    {
-                        mpSystem->ResetActiveMap();
-                        Verbose::PrintMess("Reseting current map...", Verbose::VERBOSITY_NORMAL);
-                    }else
-                        CreateMapInAtlas();
-
-                    if(mpLastKeyFrame)
-                        mpLastKeyFrame = static_cast<KeyFrame*>(NULL);
-
-                    Verbose::PrintMess("done", Verbose::VERBOSITY_NORMAL);
-
-                    return;
                 }
             }
 
@@ -2180,14 +2242,41 @@ void Tracking::Track()
         {
             if(bOK)
             {
-                if(mCurrentFrame.mnId==(mnLastRelocFrameId+mnFramesToResetIMU))
+                if(mbVisualRecovery)
+                {
+                    /*
+                    * We recovered the existing map visually after an
+                    * inertial failure.
+                    *
+                    * Do NOT call ResetFrameIMU().
+                    * This checkout has no implemented ResetFrameIMU()
+                    * recovery path suitable for our preserved-map mode.
+                    */
+                }
+                else if(mCurrentFrame.mnId ==
+                        (mnLastRelocFrameId + mnFramesToResetIMU))
                 {
                     cout << "RESETING FRAME!!!" << endl;
                     ResetFrameIMU();
                 }
-                else if(mCurrentFrame.mnId>(mnLastRelocFrameId+30))
+                else if(mCurrentFrame.mnId >
+                        (mnLastRelocFrameId + 30))
+                {
                     mLastBias = mCurrentFrame.mImuBias;
+                }
             }
+        }
+
+        if(mbVisualRecovery &&
+        bOK &&
+        mCurrentFrame.mnId > mnLastRelocFrameId + 30)
+        {
+            cout
+                << "TRACK: Visual recovery complete. "
+                "Returning to normal inertial tracking."
+                << endl;
+
+            mbVisualRecovery = false;
         }
 
 #ifdef REGISTER_TIMES
@@ -2967,27 +3056,68 @@ bool Tracking::TrackLocalMap()
         }
 
     int inliers;
-    if (!mpAtlas->isImuInitialized())
+     if (!mpAtlas->isImuInitialized())
+    {
         Optimizer::PoseOptimization(&mCurrentFrame);
+    }
+    else if (mbVisualRecovery)
+    {
+        // During visual recovery, do NOT use the inertial prior from
+        // the previous frame. The old IMU preintegration state may be
+        // invalid after relocalization.
+        Verbose::PrintMess(
+            "TLM: Visual PoseOptimization during recovery",
+            Verbose::VERBOSITY_DEBUG);
+
+        inliers = Optimizer::PoseOptimization(&mCurrentFrame);
+    }
     else
     {
-        if(mCurrentFrame.mnId<=mnLastRelocFrameId+mnFramesToResetIMU)
+        if(mCurrentFrame.mnId <= mnLastRelocFrameId + mnFramesToResetIMU)
         {
-            Verbose::PrintMess("TLM: PoseOptimization ", Verbose::VERBOSITY_DEBUG);
-            Optimizer::PoseOptimization(&mCurrentFrame);
+            Verbose::PrintMess(
+                "TLM: PoseOptimization ",
+                Verbose::VERBOSITY_DEBUG);
+
+            inliers = Optimizer::PoseOptimization(&mCurrentFrame);
         }
         else
         {
-            // if(!mbMapUpdated && mState == OK) //  && (mnMatchesInliers>30))
-            if(!mbMapUpdated) //  && (mnMatchesInliers>30))
+            if(!mbMapUpdated)
             {
-                Verbose::PrintMess("TLM: PoseInertialOptimizationLastFrame ", Verbose::VERBOSITY_DEBUG);
-                inliers = Optimizer::PoseInertialOptimizationLastFrame(&mCurrentFrame); // , !mpLastKeyFrame->GetMap()->GetIniertialBA1());
+                // Only use the inertial last-frame optimization when
+                // the previous frame has a valid IMU constraint.
+                if(mCurrentFrame.mpPrevFrame &&
+                   mCurrentFrame.mpPrevFrame->mpcpi)
+                {
+                    Verbose::PrintMess(
+                        "TLM: PoseInertialOptimizationLastFrame",
+                        Verbose::VERBOSITY_DEBUG);
+
+                    inliers =
+                        Optimizer::PoseInertialOptimizationLastFrame(
+                            &mCurrentFrame);
+                }
+                else
+                {
+                    // Fall back to visual optimization rather than
+                    // dereferencing an invalid IMU prior.
+                    Verbose::PrintMess(
+                        "TLM: Missing IMU prior; using PoseOptimization",
+                        Verbose::VERBOSITY_DEBUG);
+
+                    inliers = Optimizer::PoseOptimization(&mCurrentFrame);
+                }
             }
             else
             {
-                Verbose::PrintMess("TLM: PoseInertialOptimizationLastKeyFrame ", Verbose::VERBOSITY_DEBUG);
-                inliers = Optimizer::PoseInertialOptimizationLastKeyFrame(&mCurrentFrame); // , !mpLastKeyFrame->GetMap()->GetIniertialBA1());
+                Verbose::PrintMess(
+                    "TLM: PoseInertialOptimizationLastKeyFrame",
+                    Verbose::VERBOSITY_DEBUG);
+
+                inliers =
+                    Optimizer::PoseInertialOptimizationLastKeyFrame(
+                        &mCurrentFrame);
             }
         }
     }

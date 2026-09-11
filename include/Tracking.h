@@ -176,6 +176,11 @@ public:
 
     bool mbWriteStats;
 
+    bool IsVisualRecovery() const
+    {
+        return mbVisualRecovery;
+    }
+
 #ifdef REGISTER_TIMES
     void LocalMapStats2File();
     void TrackStats2File();
@@ -329,6 +334,7 @@ protected:
     bool mbCreatedMap;
 
     //Motion Model
+    bool mbVisualRecovery = false;
     bool mbVelocity{false};
     Sophus::SE3f mVelocity;
 

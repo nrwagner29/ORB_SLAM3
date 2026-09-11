@@ -206,7 +206,7 @@ void Viewer::Run()
     Ow.SetIdentity();
     cv::namedWindow("ORB-SLAM3: Current Frame");
 
-    bool bFollow = true;
+    bool bFollow = false;
     bool bLocalizationMode = false;
     bool bStepByStep = false;
     bool bCameraView = true;
@@ -224,6 +224,35 @@ void Viewer::Run()
         glClear(GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT);
 
         mpMapDrawer->GetCurrentOpenGLCameraMatrix(Twc,Ow);
+
+        if(mpSystem->MapChanged())
+        {
+            bCameraView = true;
+            bFollow = false;
+
+            s_cam.SetProjectionMatrix(
+                pangolin::ProjectionMatrix(
+                    1024,
+                    768,
+                    mViewpointF,
+                    mViewpointF,
+                    512,
+                    389,
+                    0.1,
+                    10000));
+
+            s_cam.SetModelViewMatrix(
+                pangolin::ModelViewLookAt(
+                    mViewpointX,
+                    mViewpointY,
+                    mViewpointZ,
+                    0,
+                    0,
+                    0,
+                    0.0,
+                    -1.0,
+                    0.0));
+        }
 
         if(mbStopTrack)
         {

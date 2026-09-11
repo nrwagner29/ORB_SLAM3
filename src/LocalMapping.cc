@@ -135,12 +135,14 @@ void LocalMapping::Run()
                             mTinit += mpCurrentKeyFrame->mTimeStamp - mpCurrentKeyFrame->mPrevKF->mTimeStamp;
                         if(!mpCurrentKeyFrame->GetMap()->GetIniertialBA2())
                         {
-                            if((mTinit<10.f) && (dist<0.02))
+                            if((mTinit < 10.f) &&
+                            (dist < 0.02) &&
+                            !mpTracker->IsVisualRecovery())
                             {
-                                cout << "Not enough motion for initializing. Reseting..." << endl;
-                                unique_lock<mutex> lock(mMutexReset);
-                                mbResetRequestedActiveMap = true;
-                                mpMapToReset = mpCurrentKeyFrame->GetMap();
+                                cout << "Not enough motion for initializing. Entering visual recovery..." << endl;
+
+                                // Do NOT reset the active map.
+                                // Let Tracking preserve the map and perform visual relocalization.
                                 mbBadImu = true;
                             }
                         }
